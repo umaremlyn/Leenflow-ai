@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
+import { CookieOptions } from "@supabase/ssr";
 
 // Server client — used in Server Components, Server Actions, Route Handlers
 export async function createClient() {
@@ -10,8 +11,15 @@ export async function createClient() {
     {
       cookies: {
         getAll() { return cookieStore.getAll(); },
-        setAll(cookiesToSet) {
-          try {
+        // setAll(cookiesToSet: { name: string; value: string; options?: any }[]) {
+        setAll(
+          cookiesToSet: {
+            name: string;
+            value: string;
+            options: CookieOptions;
+          }[]
+        ) {
+        try {
             cookiesToSet.forEach(({ name, value, options }) =>
               cookieStore.set(name, value, options)
             );
