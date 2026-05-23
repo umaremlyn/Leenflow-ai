@@ -13,114 +13,108 @@ const ChatSchema = z.object({
   channel:        z.enum(["website","whatsapp","instagram","api"]).default("website"),
   visitorName:    z.string().max(100).optional(),
   visitorEmail:   z.string().email().optional(),
-  visitorPhone:   z.string().max(30).optional(),
+  visitorPhone:   z.string().max(20).optional(),
 });
 
 export async function POST(request: NextRequest) {
-  // 1. Rate limiting — per IP
+  // ── 1. Rate limit by IP ─────────────────────────────────────
   const ip     = getIp(request);
-  const rl     = rateLimit(`chat:${ip}`, RATE_LIMITS.chat);
-  if (!rl.allowed) return rateLimited(rl.resetInMs);
+  const limit  = rateLimit(`chat:${ip}`, RATE_LIMITS.chat);
+  if (!limit.allowed) return rateLimited(limit.resetInMs);
 
   try {
-    // 2. Parse + validate body
-    const body  = await request.json().catch(() => null);
-    if (!body)  return err("Invalid JSON body", 400);
-    const input = ChatSchema.safeParse(body);
-    if (!input.success) return zodErr(input.error);
-    const { tenantId, conversationId: existingConvId, message,
-            channel, visitorName, visitorEmail, visitorPhone } = input.data;
-
+    const body  = ChatSchema.parse(await request.json());
     const supabase = createAdminClient();
 
-    // 3. Load tenant + enforce usage limits
+    // ── 2. Load + validate tenant ───────────────────────────────
     const { data: tenant } = await supabase
       .from("tenants").select("id,name,plan,msg_used,msg_limit,is_active")
-      .eq("id", tenantId).single();
+      .eq("id", body.tenantId).single();
 
     if (!tenant)           return notFound("Business");
     if (!tenant.is_active) return err("This assistant is currently inactive", 403);
     if (tenant.msg_used >= tenant.msg_limit)
       return err("Message limit reached. Please contact the business directly.", 429);
 
-    // 4. Load assistant config
+    // ── 3. Load assistant config ────────────────────────────────
     const { data: assistant } = await supabase
-      .from("assistants").select("*").eq("tenant_id", tenantId).single();
+      .from("assistants").select("*").eq("tenant_id", body.tenantId).single();
+
     if (!assistant?.is_live) return notFound("Assistant");
 
-    // 5. Get or create conversation
-    let conversationId = existingConvId;
-    if (!conversationId) {
-      const { data: conv, error: convErr } = await supabase
-        .from("conversations")
-        .insert({ tenant_id: tenantId, channel,
-                  visitor_name:  visitorName  ?? null,
-                  visitor_email: visitorEmail ?? null,
-                  visitor_phone: visitorPhone ?? null })
-        .select("id").single();
-      if (convErr || !conv) return serverError(convErr, "create conversation");
-      conversationId = conv.id;
+    // ── 4. Get or create conversation ──────────────────────────
+    let convId = body.conversationId;
+    if (!convId) {
+      const { data: conv } = await supabase.from("conversations")
+        .insert({
+          tenant_id:     body.tenantId,
+          channel:       body.channel,
+          visitor_name:  body.visitorName  ?? null,
+          visitor_email: body.visitorEmail ?? null,
+          visitor_phone: body.visitorPhone ?? null,
+        }).select("id").single();
+      convId = conv?.id;
     }
+    if (!convId) return serverError("conv_create_failed", "chat");
 
-    // 6. Fetch recent message history (last 20 turns)
-    const { data: history } = await supabase
-      .from("messages").select("role,content")
-      .eq("conversation_id", conversationId)
+    // ── 5. Load message history (last 20 turns) ─────────────────
+    const { data: history } = await supabase.from("messages")
+      .select("role,content").eq("conversation_id", convId)
       .order("created_at", { ascending: true }).limit(20);
 
     const messages = (history ?? []).map(m => ({
       role: m.role as "user" | "assistant", content: m.content,
     }));
 
-    // 7. Store user message
-    await supabase.from("messages").insert({
-      conversation_id: conversationId, role: "user", content: message,
-    });
+    // ── 6. Save user message ────────────────────────────────────
+    await supabase.from("messages")
+      .insert({ conversation_id: convId, role: "user", content: body.message });
 
-    // 8. Run RAG + OpenAI
+    // ── 7. RAG + OpenAI ─────────────────────────────────────────
     const { content, confScore } = await chat({
-      tenantId, tenantName: tenant.name, assistant, messages, userMessage: message,
+      tenantId:    body.tenantId,
+      tenantName:  tenant.name,
+      assistant,
+      messages,
+      userMessage: body.message,
     });
 
-    // 9. Store AI reply
+    // ── 8. Save AI reply ────────────────────────────────────────
     await supabase.from("messages").insert({
-      conversation_id: conversationId, role: "assistant",
+      conversation_id: convId, role: "assistant",
       content, conf_score: confScore,
     });
 
-    // 10. Auto-capture lead if contact info was provided
-    if (visitorName && (visitorEmail || visitorPhone)) {
-      const { data: existingLead } = await supabase
-        .from("leads").select("id")
-        .eq("conversation_id", conversationId).single();
-
-      if (!existingLead) {
+    // ── 9. Auto-capture lead if contact info provided ───────────
+    if (body.visitorName && (body.visitorEmail || body.visitorPhone)) {
+      const { data: existing } = await supabase.from("leads")
+        .select("id").eq("conversation_id", convId).single();
+      if (!existing) {
         await supabase.from("leads").insert({
-          tenant_id:       tenantId,
-          conversation_id: conversationId,
-          full_name:       visitorName,
-          email:           visitorEmail ?? null,
-          phone:           visitorPhone ?? null,
+          tenant_id:       body.tenantId,
+          conversation_id: convId,
+          full_name:       body.visitorName,
+          email:           body.visitorEmail ?? null,
+          phone:           body.visitorPhone ?? null,
           temperature:     "warm",
           status:          "new",
         });
         await supabase.from("conversations")
-          .update({ lead_captured: true }).eq("id", conversationId);
+          .update({ lead_captured: true, visitor_name: body.visitorName,
+                    visitor_email: body.visitorEmail ?? null,
+                    visitor_phone: body.visitorPhone ?? null })
+          .eq("id", convId);
       }
     }
 
-    // 11. Set rate-limit headers on the response
-    return NextResponse.json(
-      { data: { conversationId, message: content, confScore }, error: null },
-      { headers: { "X-RateLimit-Remaining": String(rl.remaining) } }
-    );
+    return ok({ conversationId: convId, message: content, confScore });
 
   } catch (e) {
-    return serverError(e, "chat route");
+    if (e instanceof z.ZodError) return zodErr(e);
+    return serverError(e, "chat-route");
   }
 }
 
-// OPTIONS — required for CORS preflight from embedded widget
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,

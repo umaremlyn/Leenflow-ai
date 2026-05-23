@@ -11,7 +11,11 @@ const UpdateSchema = z.object({
   is_active:   z.boolean().optional(),
 });
 
-export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -19,7 +23,7 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
   try {
     const body = UpdateSchema.parse(await request.json());
     const { data, error } = await supabase.from("products")
-      .update(body).eq("id", params.id).eq("tenant_id", u!.tenant_id).select().single();
+      .update(body).eq("id", id).eq("tenant_id", u!.tenant_id).select().single();
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     return NextResponse.json({ data });
   } catch (e) {
@@ -28,13 +32,17 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
   }
 }
 
-export async function DELETE(_: NextRequest, { params }: { params: { id: string } }) {
+export async function DELETE(
+  _: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const { data: u } = await supabase.from("users").select("tenant_id").eq("id", user.id).single();
   const { error } = await supabase.from("products")
-    .delete().eq("id", params.id).eq("tenant_id", u!.tenant_id);
+    .delete().eq("id", id).eq("tenant_id", u!.tenant_id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   return NextResponse.json({ success: true });
 }

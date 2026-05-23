@@ -7,15 +7,23 @@ import { format } from "date-fns";
 
 export const metadata = { title: "Conversation" };
 
-export default async function ConversationDetailPage({ params }: { params: { id: string } }) {
+export default async function ConversationDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  // Next.js 15 — params is a Promise, must be awaited
+  const { id } = await params;
+
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  const { data: appUser } = await supabase.from("users").select("tenant_id").eq("id", user!.id).single();
+  const { data: appUser } = await supabase
+    .from("users").select("tenant_id").eq("id", user!.id).single();
 
   const { data: conv } = await supabase
     .from("conversations")
     .select("*")
-    .eq("id", params.id)
+    .eq("id", id)
     .eq("tenant_id", appUser!.tenant_id)
     .single();
 
@@ -24,14 +32,14 @@ export default async function ConversationDetailPage({ params }: { params: { id:
   const { data: messages } = await supabase
     .from("messages")
     .select("*")
-    .eq("conversation_id", params.id)
+    .eq("conversation_id", id)
     .order("created_at", { ascending: true });
 
   const { data: lead } = await supabase
     .from("leads")
     .select("*")
-    .eq("conversation_id", params.id)
-    .single();
+    .eq("conversation_id", id)
+    .maybeSingle();
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -52,7 +60,9 @@ export default async function ConversationDetailPage({ params }: { params: { id:
         </div>
         <div className="flex items-center gap-2">
           {conv.lead_captured && <Badge variant="live">Lead captured</Badge>}
-          <Badge variant={conv.channel === "whatsapp" ? "converted" : "new"}>{conv.channel}</Badge>
+          <Badge variant={conv.channel === "whatsapp" ? "converted" : "new"}>
+            {conv.channel}
+          </Badge>
         </div>
       </div>
 
@@ -86,7 +96,6 @@ export default async function ConversationDetailPage({ params }: { params: { id:
         <div className="p-5 space-y-4 max-h-[60vh] overflow-y-auto">
           {messages && messages.length > 0 ? messages.map((msg: any) => (
             <div key={msg.id} className={`flex gap-3 ${msg.role === "user" ? "flex-row-reverse" : ""}`}>
-              {/* Avatar */}
               <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${
                 msg.role === "assistant" ? "bg-brand-100" : "bg-gray-100"
               }`}>
@@ -94,9 +103,7 @@ export default async function ConversationDetailPage({ params }: { params: { id:
                   ? <Bot size={13} className="text-brand-600" />
                   : <User size={13} className="text-gray-500" />}
               </div>
-
-              {/* Bubble */}
-              <div className={`max-w-[78%] ${msg.role === "user" ? "items-end" : "items-start"} flex flex-col gap-1`}>
+              <div className={`max-w-[78%] flex flex-col gap-1 ${msg.role === "user" ? "items-end" : "items-start"}`}>
                 <div className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
                   msg.role === "assistant"
                     ? "bg-gray-100 text-gray-800 rounded-tl-sm"
@@ -121,7 +128,9 @@ export default async function ConversationDetailPage({ params }: { params: { id:
               </div>
             </div>
           )) : (
-            <p className="text-sm text-gray-400 text-center py-8">No messages in this conversation</p>
+            <p className="text-sm text-gray-400 text-center py-8">
+              No messages in this conversation
+            </p>
           )}
         </div>
       </div>
@@ -134,11 +143,13 @@ export default async function ConversationDetailPage({ params }: { params: { id:
             { label: "Name",    value: conv.visitor_name  },
             { label: "Email",   value: conv.visitor_email },
             { label: "Phone",   value: conv.visitor_phone },
-            { label: "Channel", value: conv.channel        },
+            { label: "Channel", value: conv.channel       },
           ].map(({ label, value }) => (
             <div key={label}>
               <p className="text-xs text-gray-500 mb-0.5">{label}</p>
-              <p className="text-sm text-gray-900">{value ?? <span className="text-gray-400">Not provided</span>}</p>
+              <p className="text-sm text-gray-900">
+                {value ?? <span className="text-gray-400">Not provided</span>}
+              </p>
             </div>
           ))}
         </div>

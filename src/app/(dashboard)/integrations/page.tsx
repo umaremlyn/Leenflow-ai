@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { Plug, Copy, Check, ExternalLink, Smartphone, Globe, Code2 } from "lucide-react";
+import { Plug, Copy, Check, ExternalLink, Globe, Code2 } from "lucide-react";
 
 export default function IntegrationsPage() {
   const [tenantId, setTenantId]     = useState<string|null>(null);

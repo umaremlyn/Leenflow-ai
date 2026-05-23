@@ -11,23 +11,25 @@ export default async function DashboardPage() {
   const { data: { user } } = await supabase.auth.getUser();
 
   const { data: appUser } = await supabase
-    .from("users").select("tenant_id, tenants(*)").eq("id", user!.id).single();
+    .from("users").select("tenant_id, full_name, tenants(*)").eq("id", user!.id).single();
 
   const tenantId = appUser?.tenant_id;
 
   // Fetch stats in parallel
-  const [convsRes, leadsRes, msgsRes, questionsRes] = await Promise.all([
+  const [convsRes, leadsRes] = await Promise.all([
     supabase.from("conversations").select("id", { count: "exact" }).eq("tenant_id", tenantId),
-    supabase.from("leads").select("id, full_name, temperature, status, captured_at", { count: "exact" }).eq("tenant_id", tenantId).order("captured_at", { ascending: false }).limit(4),
-    supabase.from("messages").select("id", { count: "exact" }).eq("conversation_id", tenantId),
-    supabase.from("faqs").select("question").eq("tenant_id", tenantId).eq("is_active", true).limit(5),
+    supabase.from("leads")
+      .select("id, full_name, temperature, status, captured_at", { count: "exact" })
+      .eq("tenant_id", tenantId)
+      .order("captured_at", { ascending: false })
+      .limit(4),
   ]);
 
   const totalConversations = convsRes.count ?? 0;
-  const totalLeads = leadsRes.count ?? 0;
-  const recentLeads = leadsRes.data ?? [];
+  const totalLeads         = leadsRes.count ?? 0;
+  const recentLeads        = leadsRes.data ?? [];
 
-  const tenant = (appUser as any)?.tenants;
+  const tenant    = (appUser as any)?.tenants;
   const firstName = (appUser as any)?.full_name?.split(" ")[0] ?? "there";
 
   const topQuestions = [
@@ -68,7 +70,9 @@ export default async function DashboardPage() {
                 </div>
                 <span className="text-sm text-gray-900 flex-1 truncate">{lead.full_name}</span>
                 <Badge variant={lead.temperature as any}>{lead.temperature}</Badge>
-                <span className="text-xs text-gray-400">{formatDistanceToNow(new Date(lead.captured_at), { addSuffix: false })}</span>
+                <span className="text-xs text-gray-400">
+                  {formatDistanceToNow(new Date(lead.captured_at), { addSuffix: false })}
+                </span>
               </div>
             )) : (
               <p className="text-sm text-gray-400 text-center py-4">No leads yet — your AI is ready to capture them</p>
@@ -91,7 +95,8 @@ export default async function DashboardPage() {
                     <span>{q}</span><span>{pct}%</span>
                   </div>
                   <div className="h-1.5 bg-gray-100 rounded-full">
-                    <div className="h-1.5 rounded-full transition-all" style={{ width: `${pct}%`, background: colors[i] }} />
+                    <div className="h-1.5 rounded-full transition-all"
+                      style={{ width: `${pct}%`, background: colors[i] }} />
                   </div>
                 </div>
               );
@@ -115,7 +120,9 @@ export default async function DashboardPage() {
                 <div className="h-2 bg-brand-600 rounded-full transition-all"
                   style={{ width: `${Math.min(100, (tenant.msg_used / tenant.msg_limit) * 100)}%` }} />
               </div>
-              <p className="text-xs text-gray-400 capitalize">Current plan: <span className="font-medium text-gray-700">{tenant.plan}</span></p>
+              <p className="text-xs text-gray-400 capitalize">
+                Current plan: <span className="font-medium text-gray-700">{tenant.plan}</span>
+              </p>
             </>
           )}
         </div>
@@ -125,10 +132,10 @@ export default async function DashboardPage() {
           <h2 className="text-sm font-semibold text-gray-900 mb-4">Quick actions</h2>
           <div className="grid grid-cols-2 gap-2">
             {[
-              { href: "/faqs",           label: "Add FAQ",           color: "bg-amber-50  text-amber-700  hover:bg-amber-100"  },
-              { href: "/products",       label: "Add product",       color: "bg-rose-50   text-rose-700   hover:bg-rose-100"   },
-              { href: "/ai-assistant",   label: "Test AI",           color: "bg-brand-50  text-brand-600  hover:bg-brand-100"  },
-              { href: "/integrations",   label: "Add WhatsApp",      color: "bg-green-50  text-green-700  hover:bg-green-100"  },
+              { href: "/faqs",         label: "Add FAQ",      color: "bg-amber-50  text-amber-700  hover:bg-amber-100" },
+              { href: "/products",     label: "Add product",  color: "bg-rose-50   text-rose-700   hover:bg-rose-100"  },
+              { href: "/ai-assistant", label: "Test AI",      color: "bg-brand-50  text-brand-600  hover:bg-brand-100" },
+              { href: "/integrations", label: "Add WhatsApp", color: "bg-green-50  text-green-700  hover:bg-green-100" },
             ].map(({ href, label, color }) => (
               <a key={href} href={href}
                 className={`${color} text-xs font-medium px-3 py-2.5 rounded-lg text-center transition-colors`}>

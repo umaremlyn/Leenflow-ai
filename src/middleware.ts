@@ -1,102 +1,69 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-// Routes that don't require authentication
 const PUBLIC_PATHS = [
   "/",
   "/login",
   "/register",
-  "/api/assistant",   // public chat API (widget)
-  "/api/webhook",     // Paystack + WhatsApp webhooks
-  "/widget",          // embeddable widget JS
-  "/_next",
-  "/favicon.ico",
+  "/api/assistant",   // public chat API
+  "/api/webhook",     // WhatsApp + Paystack webhooks
+  "/api/health",      // uptime monitor
+  "/widget",          // embeddable JS bundle
 ];
 
-function isPublicPath(pathname: string): boolean {
+function isPublic(pathname: string): boolean {
   return PUBLIC_PATHS.some(p => pathname === p || pathname.startsWith(p + "/") || pathname.startsWith(p + "?"));
 }
 
-// Block obviously malicious path patterns
-const BLOCKED_PATTERNS = [
-  /\.env/i,
-  /\/\.\./,           // path traversal
-  /<script/i,         // XSS in path
-  /\beval\b/i,
-  /\/wp-admin/i,      // WordPress scan noise
-  /\/phpMyAdmin/i,
-  /\.php$/i,
-  /\.asp$/i,
-];
-
-function isBlockedPath(pathname: string): boolean {
-  return BLOCKED_PATTERNS.some(p => p.test(pathname));
-}
-
 export async function middleware(request: NextRequest) {
-  const { pathname } = request.nextUrl;
-
-  // ── Block malicious paths early ─────────────────────────
-  if (isBlockedPath(pathname)) {
-    return new NextResponse(null, { status: 404 });
-  }
-
-  // ── Static assets — skip all auth logic ─────────────────
-  if (pathname.startsWith("/_next/static") || pathname.startsWith("/_next/image")) {
-    return NextResponse.next();
-  }
-
-  let supabaseResponse = NextResponse.next({ request });
+  let response = NextResponse.next({ request });
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() { return request.cookies.getAll(); },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) =>
-            request.cookies.set(name, value)
-          );
-          supabaseResponse = NextResponse.next({ request });
+        getAll: ()             => request.cookies.getAll(),
+        setAll: (cookiesToSet) => {
+          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value));
+          response = NextResponse.next({ request });
           cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
+            response.cookies.set(name, value, options)
           );
         },
       },
     }
   );
 
-  // Refresh session — do NOT remove; required by Supabase SSR
+  // IMPORTANT: always refresh session — do not remove
   const { data: { user } } = await supabase.auth.getUser();
+  const { pathname } = request.nextUrl;
 
-  // ── Redirect unauthenticated users to login ─────────────
-  if (!user && !isPublicPath(pathname)) {
+  // Redirect unauthenticated users away from protected routes
+  if (!user && !isPublic(pathname)) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("redirectTo", pathname);
     return NextResponse.redirect(url);
   }
 
-  // ── Redirect authenticated users away from auth pages ───
-  if (user && (pathname === "/login" || pathname === "/register" || pathname === "/")) {
+  // Redirect authenticated users away from auth pages
+  if (user && (pathname === "/login" || pathname === "/register")) {
     const url = request.nextUrl.clone();
-    const redirectTo = request.nextUrl.searchParams.get("redirectTo") ?? "/dashboard";
-    url.pathname = redirectTo.startsWith("/") ? redirectTo : "/dashboard";
-    url.search   = "";
+    url.pathname = "/dashboard";
     return NextResponse.redirect(url);
   }
 
-  // ── Add security headers to all responses ───────────────
-  supabaseResponse.headers.set("X-Content-Type-Options", "nosniff");
-  supabaseResponse.headers.set("X-Frame-Options",        "DENY");
-  supabaseResponse.headers.set("Referrer-Policy",        "strict-origin-when-cross-origin");
+  // Add tenant context header for API routes (avoids re-fetching user in every handler)
+  if (user && pathname.startsWith("/api/")) {
+    response.headers.set("x-user-id", user.id);
+  }
 
-  return supabaseResponse;
+  return response;
 }
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|js|css|woff2?)).*)",
+    "/((?!_next/static|_next/image|favicon\\.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt)).*)",
   ],
 };
