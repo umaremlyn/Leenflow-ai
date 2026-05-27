@@ -20,13 +20,37 @@ export default function RegisterPage() {
     e.preventDefault();
     setLoading(true);
     setError("");
-    const { data, error } = await supabase.auth.signUp({ email: form.email, password: form.password });
-    if (error) { setError(error.message); setLoading(false); return; }
-    if (data.user) {
-      const slug = form.businessName.toLowerCase().replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-");
-      const { error: tenantError } = await supabase.from("tenants").insert({ name: form.businessName, slug, industry: form.industry, plan: "starter", msg_limit: 500 });
-      if (tenantError) { setError("Account created but setup failed. Please contact support."); setLoading(false); return; }
+
+    const response = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: form.email,
+        password: form.password,
+        fullName: form.fullName,
+        businessName: form.businessName,
+        industry: form.industry,
+      }),
+    });
+
+    const result = await response.json();
+    if (!response.ok) {
+      setError(result.error ?? "Registration failed.");
+      setLoading(false);
+      return;
     }
+
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: form.email,
+      password: form.password,
+    });
+
+    if (signInError) {
+      setError(signInError.message);
+      setLoading(false);
+      return;
+    }
+
     router.push("/dashboard");
   }
 
@@ -91,7 +115,7 @@ export default function RegisterPage() {
                 className="flex-1 border border-gray-300 text-gray-700 font-medium py-2.5 rounded-lg text-sm hover:bg-gray-50 transition-colors">
                 Back
               </button>
-              <button type="submit" disabled={loading || !form.businessName}
+              <button type="submit" disabled={loading || !form.businessName || !form.industry}
                 className="flex-1 bg-brand-600 hover:bg-brand-800 text-white font-medium py-2.5 rounded-lg text-sm transition-colors disabled:opacity-60">
                 {loading ? "Creating…" : "Create account"}
               </button>
