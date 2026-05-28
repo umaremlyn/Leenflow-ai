@@ -81,7 +81,7 @@ export async function POST(req: Request) {
           full_name: fullName,
           role: "owner",
         },
-        { onConflict: ["id"] }
+        { onConflict: "id" }
       );
 
     if (userUpsertError) {
