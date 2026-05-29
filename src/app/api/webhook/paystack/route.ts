@@ -27,29 +27,55 @@ export async function POST(request: NextRequest) {
 
     switch (event.event) {
       case "subscription.create": {
-        const sub   = event.data;
-        const email = sub.customer?.email;
-        const plan  = sub.plan?.name?.toLowerCase() ?? "starter";
+        const sub      = event.data;
+        const email    = sub.customer?.email;
+        const plan     = sub.plan?.name?.toLowerCase() ?? "starter";
+        const newSubId = sub.subscription_code;
 
-        if (email) {
-          // Find user by email
-          const { data: user } = await supabase
-            .from("users").select("tenant_id").eq("email", email).single();
-
-          if (user) {
-            const limit = PLAN_MESSAGE_LIMITS[plan] ?? 500;
-            // Update tenant plan and limits
-            await supabase.from("tenants").update({ plan, msg_limit: limit }).eq("id", user.tenant_id);
-            // Upsert subscription record
-            await supabase.from("subscriptions").upsert({
-              tenant_id:          user.tenant_id,
-              plan,
-              paystack_sub_id:    sub.subscription_code,
-              status:             "active",
-              current_period_end: sub.next_payment_date,
-            }, { onConflict: "tenant_id" });
-          }
+        if (!email || !newSubId) {
+          console.warn("[Paystack] subscription.create missing email or subscription_code", { email, newSubId });
+          break;
         }
+
+        const { data: user } = await supabase
+          .from("users").select("tenant_id").eq("email", email).single();
+
+        if (!user) {
+          console.warn("[Paystack] subscription.create for unknown email", email);
+          break;
+        }
+
+        // If an active subscription already exists for this tenant under a
+        // different paystack_sub_id, refuse — prevents a third party from
+        // re-binding the tenant's plan by paying with the matching email.
+        const { data: existingSub } = await supabase
+          .from("subscriptions")
+          .select("paystack_sub_id, status")
+          .eq("tenant_id", user.tenant_id)
+          .maybeSingle();
+
+        if (
+          existingSub &&
+          existingSub.status === "active" &&
+          existingSub.paystack_sub_id &&
+          existingSub.paystack_sub_id !== newSubId
+        ) {
+          console.warn(
+            "[Paystack] Refusing subscription.create — tenant already has active sub",
+            { tenant_id: user.tenant_id, existing: existingSub.paystack_sub_id, incoming: newSubId },
+          );
+          break;
+        }
+
+        const limit = PLAN_MESSAGE_LIMITS[plan] ?? 500;
+        await supabase.from("tenants").update({ plan, msg_limit: limit }).eq("id", user.tenant_id);
+        await supabase.from("subscriptions").upsert({
+          tenant_id:          user.tenant_id,
+          plan,
+          paystack_sub_id:    newSubId,
+          status:             "active",
+          current_period_end: sub.next_payment_date,
+        }, { onConflict: "tenant_id" });
         break;
       }
 

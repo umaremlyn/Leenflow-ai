@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { embedText, retrieveContext, chat } from "@/lib/ai/rag";
 import type { Assistant } from "@/types";
+import { DEFAULT_BEHAVIOUR_RULES } from "@/types";
 
 const mockAssistant: Assistant = {
   id:              "ast-001",
@@ -13,6 +14,7 @@ const mockAssistant: Assistant = {
   lead_capture_on: true,
   conf_threshold:  0.6,
   is_live:         true,
+  behaviour_rules: DEFAULT_BEHAVIOUR_RULES,
   updated_at:      new Date().toISOString(),
 };
 

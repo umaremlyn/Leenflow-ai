@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { FileText, Save } from "lucide-react";
+import { triggerTrain } from "@/lib/utils/triggerTrain";
 import type { Policy, PolicyType } from "@/types";
 
 const POLICY_TYPES: { type: PolicyType; label: string; placeholder: string }[] = [
@@ -40,6 +41,7 @@ export default function PoliciesPage() {
       { tenant_id: tenantId, policy_type: type, content: policies[type] ?? "", updated_at: new Date().toISOString() },
       { onConflict: "tenant_id,policy_type" }
     );
+    triggerTrain();
     setSaved(s => ({...s, [type]: true}));
     setSaving(null);
     setTimeout(() => setSaved(s => ({...s, [type]: false})), 2000);

@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Package, Plus, Trash2, Pencil, X, Check } from "lucide-react";
+import { triggerTrain } from "@/lib/utils/triggerTrain";
 import type { Product } from "@/types";
 
 const CATEGORIES = ["Clothing","Fabric","Food & Drink","Electronics","Beauty","Home & Living","Services","Digital Products","Other"];
@@ -48,17 +49,20 @@ export default function ProductsPage() {
     } else {
       await supabase.from("products").insert(payload);
     }
+    triggerTrain();
     setSaving(false); closeForm(); load();
   }
 
   async function remove(id: string) {
     if (!confirm("Delete this product?")) return;
     await supabase.from("products").delete().eq("id", id);
+    triggerTrain();
     setProducts(p => p.filter(x => x.id !== id));
   }
 
   async function toggleActive(p: Product) {
     await supabase.from("products").update({ is_active: !p.is_active }).eq("id", p.id);
+    triggerTrain();
     setProducts(ps => ps.map(x => x.id === p.id ? { ...x, is_active: !x.is_active } : x));
   }
 

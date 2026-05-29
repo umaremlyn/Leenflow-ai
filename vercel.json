@@ -1,41 +1,39 @@
 {
-  "framework": "nextjs",
+  "framework":   "nextjs",
   "buildCommand": "npm run build",
   "devCommand":   "npm run dev",
   "installCommand": "npm install",
-  "regions": ["fra1"],
-  "env": {
-    "NEXT_PUBLIC_APP_NAME": "Leen-Co AI"
-  },
+
   "functions": {
-    "src/app/api/assistant/chat/route.ts": {
-      "maxDuration": 30
-    },
-    "src/app/api/train/route.ts": {
-      "maxDuration": 60
-    },
-    "src/app/api/webhook/whatsapp/route.ts": {
-      "maxDuration": 15
-    },
-    "src/app/api/webhook/paystack/route.ts": {
-      "maxDuration": 10
-    }
+    "src/app/api/assistant/chat/route.ts": { "maxDuration": 30 },
+    "src/app/api/train/route.ts":          { "maxDuration": 60 },
+    "src/app/api/webhook/whatsapp/route.ts": { "maxDuration": 15 },
+    "src/app/api/webhook/paystack/route.ts": { "maxDuration": 10 }
   },
+
   "headers": [
-    {
-      "source": "/widget/(.*)",
-      "headers": [
-        { "key": "Access-Control-Allow-Origin",  "value": "*"        },
-        { "key": "Cache-Control",                "value": "public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400" }
-      ]
-    },
     {
       "source": "/api/assistant/(.*)",
       "headers": [
         { "key": "Access-Control-Allow-Origin",  "value": "*"                          },
-        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS"          },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS"         },
         { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
       ]
+    },
+    {
+      "source": "/widget/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*"                            },
+        { "key": "Cache-Control", "value": "public, max-age=3600, stale-while-revalidate=86400" }
+      ]
     }
-  ]
+  ],
+
+  "rewrites": [
+    { "source": "/health", "destination": "/api/health" }
+  ],
+
+  "env": {
+    "NEXT_PUBLIC_APP_VERSION": "1.0.0"
+  }
 }

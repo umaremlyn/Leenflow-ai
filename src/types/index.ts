@@ -30,6 +30,22 @@ export interface AppUser {
 export type Tone = "friendly" | "professional" | "formal" | "casual";
 export type Language = "english" | "yoruba" | "hausa" | "igbo" | "pidgin" | "french";
 
+export interface BehaviourRules {
+  capture_lead_before_pricing: boolean;
+  escalate_on_low_confidence:  boolean;
+  only_business_topics:        boolean;
+  show_payment_steps:          boolean;
+  after_hours_response:        boolean;
+}
+
+export const DEFAULT_BEHAVIOUR_RULES: BehaviourRules = {
+  capture_lead_before_pricing: true,
+  escalate_on_low_confidence:  true,
+  only_business_topics:        true,
+  show_payment_steps:          true,
+  after_hours_response:        false,
+};
+
 export interface Assistant {
   id: string;
   tenant_id: string;
@@ -41,6 +57,7 @@ export interface Assistant {
   lead_capture_on: boolean;
   conf_threshold: number;
   is_live: boolean;
+  behaviour_rules: BehaviourRules;
   updated_at: string;
 }
 

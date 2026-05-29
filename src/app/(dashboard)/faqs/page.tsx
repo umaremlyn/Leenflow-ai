@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { HelpCircle, Plus, Trash2, GripVertical } from "lucide-react";
+import { triggerTrain } from "@/lib/utils/triggerTrain";
 import type { FAQ } from "@/types";
 
 export default function FAQsPage() {
@@ -28,6 +29,7 @@ export default function FAQsPage() {
     const { data: user } = await supabase.auth.getUser();
     const { data: appUser } = await supabase.from("users").select("tenant_id").eq("id", user.user!.id).single();
     await supabase.from("faqs").insert({ ...form, tenant_id: appUser!.tenant_id, sort_order: faqs.length });
+    triggerTrain();
     setForm({ question: "", answer: "" });
     setShowForm(false);
     setSaving(false);
@@ -37,6 +39,7 @@ export default function FAQsPage() {
   async function deleteFAQ(id: string) {
     if (!confirm("Delete this FAQ?")) return;
     await supabase.from("faqs").delete().eq("id", id);
+    triggerTrain();
     setFaqs(faqs.filter(f => f.id !== id));
   }
 

@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
-import { BarChart2, TrendingUp, Users, MessageSquare, CheckCircle, AlertTriangle } from "lucide-react";
+import { BarChart2, Users, MessageSquare, CheckCircle, AlertTriangle } from "lucide-react";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer,
@@ -27,13 +27,15 @@ function CustomTooltip({ active, payload, label }: any) {
   );
 }
 
+type TempBreakdown = { label: string; pct: number; count: number; color: string; bg: string; text: string };
+
 export default function AnalyticsPage() {
   const [range, setRange]           = useState(30);
   const [convData, setConvData]     = useState<any[]>([]);
-  const [leadData, setLeadData]     = useState<any[]>([]);
   const [channelData, setChannelData] = useState<any[]>([]);
-  const [topQuestions, setTopQ]     = useState<any[]>([]);
-  const [totals, setTotals]         = useState({ convs: 0, leads: 0, resolution: 84, unanswered: 5 });
+  const [topQuestions, setTopQ]     = useState<{ q: string; count: number }[]>([]);
+  const [tempData, setTempData]     = useState<TempBreakdown[]>([]);
+  const [totals, setTotals]         = useState({ convs: 0, leads: 0, resolution: 0, unanswered: 0 });
   const [loading, setLoading]       = useState(true);
   const supabase = createClient();
 
@@ -44,9 +46,12 @@ export default function AnalyticsPage() {
     const tid = u!.tenant_id;
     const since = subDays(new Date(), range).toISOString();
 
-    const [convsRes, leadsRes] = await Promise.all([
+    // messages.tenant_id doesn't exist — RLS scopes messages via conversations,
+    // so a plain .gte("created_at", since) returns only this tenant's rows.
+    const [convsRes, leadsRes, msgsRes] = await Promise.all([
       supabase.from("conversations").select("started_at, channel").eq("tenant_id", tid).gte("started_at", since),
       supabase.from("leads").select("captured_at, temperature").eq("tenant_id", tid).gte("captured_at", since),
+      supabase.from("messages").select("role, content, conf_score").gte("created_at", since),
     ]);
 
     const days = eachDayOfInterval({ start: subDays(new Date(), range - 1), end: new Date() });
@@ -72,29 +77,52 @@ export default function AnalyticsPage() {
     }));
 
     setConvData(labelledTimeline);
-    setLeadData(timeline.slice(-14).map(d => ({ date: d.date, leads: d.leads })));
 
     // Channel breakdown
     const chanMap: Record<string, number> = {};
     (convsRes.data ?? []).forEach((c: any) => { chanMap[c.channel] = (chanMap[c.channel] ?? 0) + 1; });
     setChannelData(Object.entries(chanMap).map(([name, value]) => ({ name, value })));
 
-    // Totals
+    // Resolution rate + unanswered Qs from assistant message confidence scores
+    const RES_THRESHOLD = 0.6;
+    const assistantMsgs = (msgsRes.data ?? []).filter((m: any) => m.role === "assistant" && m.conf_score !== null);
+    const resolved      = assistantMsgs.filter((m: any) => m.conf_score >= RES_THRESHOLD).length;
+    const unanswered    = assistantMsgs.length - resolved;
+    const resolution    = assistantMsgs.length > 0 ? Math.round((resolved / assistantMsgs.length) * 100) : 0;
+
     setTotals({
       convs:      convsRes.data?.length ?? 0,
       leads:      leadsRes.data?.length ?? 0,
-      resolution: 84,
-      unanswered: 5,
+      resolution,
+      unanswered,
     });
 
-    // Top questions (static for now — in production derive from messages)
-    setTopQ([
-      { q: "Delivery timeline",  count: 34 },
-      { q: "Pricing details",    count: 28 },
-      { q: "Return policy",      count: 19 },
-      { q: "Payment methods",    count: 15 },
-      { q: "Custom orders",      count: 10 },
-      { q: "Product availability", count: 8 },
+    // Top questions from user messages — light normalization, count, top 6
+    const qCounts = new Map<string, number>();
+    (msgsRes.data ?? [])
+      .filter((m: any) => m.role === "user" && typeof m.content === "string")
+      .forEach((m: any) => {
+        const key = m.content.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 80);
+        if (key.length < 4) return;
+        qCounts.set(key, (qCounts.get(key) ?? 0) + 1);
+      });
+    const topQ = Array.from(qCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([q, count]) => ({ q: q.length > 40 ? q.slice(0, 37) + "…" : q, count }));
+    setTopQ(topQ);
+
+    // Lead temperature breakdown — real percentages
+    const tempCounts: Record<string, number> = { hot: 0, warm: 0, cold: 0 };
+    (leadsRes.data ?? []).forEach((l: any) => {
+      if (l.temperature in tempCounts) tempCounts[l.temperature]++;
+    });
+    const tempTotal = tempCounts.hot + tempCounts.warm + tempCounts.cold;
+    const tempPct = (n: number) => tempTotal > 0 ? Math.round((n / tempTotal) * 100) : 0;
+    setTempData([
+      { label: "Hot leads",  pct: tempPct(tempCounts.hot),  count: tempCounts.hot,  color: "#ef4444", bg: "bg-red-100",   text: "text-red-700"   },
+      { label: "Warm leads", pct: tempPct(tempCounts.warm), count: tempCounts.warm, color: "#f59e0b", bg: "bg-amber-100", text: "text-amber-700" },
+      { label: "Cold leads", pct: tempPct(tempCounts.cold), count: tempCounts.cold, color: "#94a3b8", bg: "bg-gray-100",  text: "text-gray-600"  },
     ]);
 
     setLoading(false);
@@ -103,10 +131,10 @@ export default function AnalyticsPage() {
   useEffect(() => { load(); }, [load]);
 
   const statCards = [
-    { label: "Conversations",     value: totals.convs,       icon: MessageSquare, color: "text-brand-600",  bg: "bg-brand-50",  delta: "+12%", trend: "up"      },
-    { label: "Leads captured",    value: totals.leads,       icon: Users,         color: "text-teal-600",   bg: "bg-teal-50",   delta: "+8%",  trend: "up"      },
-    { label: "AI resolution rate",value: `${totals.resolution}%`, icon: CheckCircle,  color: "text-green-600",  bg: "bg-green-50",  delta: "+5%",  trend: "up"  },
-    { label: "Unanswered Qs",     value: totals.unanswered,  icon: AlertTriangle, color: "text-amber-600",  bg: "bg-amber-50",  delta: "review", trend: "down" },
+    { label: "Conversations",      value: totals.convs,            icon: MessageSquare, color: "text-brand-600", bg: "bg-brand-50"  },
+    { label: "Leads captured",     value: totals.leads,            icon: Users,         color: "text-teal-600",  bg: "bg-teal-50"   },
+    { label: "AI resolution rate", value: `${totals.resolution}%`, icon: CheckCircle,   color: "text-green-600", bg: "bg-green-50"  },
+    { label: "Unanswered Qs",      value: totals.unanswered,       icon: AlertTriangle, color: "text-amber-600", bg: "bg-amber-50"  },
   ];
 
   const CHANNEL_COLORS: Record<string, string> = { website: "#534AB7", whatsapp: "#16a34a", instagram: "#f97316", api: "#94a3b8" };
@@ -141,10 +169,8 @@ export default function AnalyticsPage() {
                 <s.icon size={13} className={s.color} />
               </div>
             </div>
-            <p className="text-2xl font-semibold text-gray-900 mb-1">{loading ? "—" : s.value}</p>
-            <p className={`text-xs flex items-center gap-1 ${s.trend === "up" ? "text-green-600" : "text-amber-600"}`}>
-              <TrendingUp size={10} /> {s.delta} this period
-            </p>
+            <p className="text-2xl font-semibold text-gray-900">{loading ? "—" : s.value}</p>
+            <p className="text-xs text-gray-400 mt-1">in this period</p>
           </div>
         ))}
       </div>
@@ -219,30 +245,34 @@ export default function AnalyticsPage() {
             <h2 className="text-sm font-semibold text-gray-900">Top questions asked</h2>
             <a href="/faqs" className="text-xs text-brand-600 hover:underline">Update FAQs →</a>
           </div>
-          <ResponsiveContainer width="100%" height={180}>
-            <BarChart data={topQuestions} layout="vertical" margin={{ top: 0, right: 8, left: 0, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f0f0f0" />
-              <XAxis type="number" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
-              <YAxis dataKey="q" type="category" width={120} tick={{ fontSize: 10, fill: "#6b7280" }} axisLine={false} tickLine={false} />
-              <Tooltip content={<CustomTooltip />} />
-              <Bar dataKey="count" name="Times asked" fill="#534AB7" radius={[0, 4, 4, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          {topQuestions.length === 0 ? (
+            <div className="h-[180px] flex items-center justify-center">
+              <p className="text-xs text-gray-400">No customer questions yet in this period</p>
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={topQuestions} layout="vertical" margin={{ top: 0, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f0f0f0" />
+                <XAxis type="number" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} allowDecimals={false} />
+                <YAxis dataKey="q" type="category" width={140} tick={{ fontSize: 10, fill: "#6b7280" }} axisLine={false} tickLine={false} />
+                <Tooltip content={<CustomTooltip />} />
+                <Bar dataKey="count" name="Times asked" fill="#534AB7" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
 
         {/* Lead temperature breakdown */}
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <h2 className="text-sm font-semibold text-gray-900 mb-4">Lead quality</h2>
           <div className="space-y-4">
-            {[
-              { label: "Hot leads",  pct: 35, color: "#ef4444", bg: "bg-red-100",   text: "text-red-700"   },
-              { label: "Warm leads", pct: 45, color: "#f59e0b", bg: "bg-amber-100", text: "text-amber-700" },
-              { label: "Cold leads", pct: 20, color: "#94a3b8", bg: "bg-gray-100",  text: "text-gray-600"  },
-            ].map(l => (
+            {tempData.length === 0 || tempData.every(t => t.count === 0) ? (
+              <p className="text-xs text-gray-400 text-center py-4">No leads captured in this period</p>
+            ) : tempData.map(l => (
               <div key={l.label}>
                 <div className="flex justify-between text-xs mb-1.5">
                   <span className={`font-medium ${l.text}`}>{l.label}</span>
-                  <span className="text-gray-500">{l.pct}%</span>
+                  <span className="text-gray-500">{l.count} ({l.pct}%)</span>
                 </div>
                 <div className="h-2.5 bg-gray-100 rounded-full">
                   <div className="h-2.5 rounded-full transition-all" style={{ width: `${l.pct}%`, background: l.color }} />

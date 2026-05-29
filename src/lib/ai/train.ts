@@ -26,6 +26,10 @@ function chunkText(text: string, maxChars = 400, overlap = 60): string[] {
 }
 
 // ─── Insert a single knowledge chunk ────────────────────────
+// Uses an RPC that takes float8[] and casts to vector(1536) explicitly.
+// Direct supabase-js inserts into the vector column store the embedding as
+// JSON text (cosine distance then returns 0 for everything) — the RPC
+// bypasses PostgREST's type coercion.
 async function insertChunk(
   supabase: ReturnType<typeof createAdminClient>,
   tenantId: string,
@@ -35,14 +39,15 @@ async function insertChunk(
   confScore = 1.0
 ) {
   const embedding = await embedText(content);
-  await supabase.from("knowledge_chunks").insert({
-    tenant_id:   tenantId,
-    source_type: sourceType,
-    source_id:   sourceId,
-    content,
-    embedding,
-    conf_score:  confScore,
+  const { error } = await supabase.rpc("insert_knowledge_chunk", {
+    p_tenant_id:   tenantId,
+    p_source_type: sourceType,
+    p_source_id:   sourceId,
+    p_content:     content,
+    p_embedding:   embedding,
+    p_conf_score:  confScore,
   });
+  if (error) throw new Error(error.message);
 }
 
 // ─── Full retrain for a tenant ───────────────────────────────
