@@ -3,7 +3,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { chat } from "@/lib/ai/rag";
 import { rateLimit, RATE_LIMITS } from "@/lib/utils/rateLimit";
 import { getIp } from "@/lib/utils/getIp";
-import { ok, err, zodErr, rateLimited, notFound, serverError } from "@/lib/utils/apiResponse";
+import { extractContact } from "@/lib/utils/extractContact";
+import { err, zodErr, rateLimited, notFound, serverError } from "@/lib/utils/apiResponse";
 import { z } from "zod";
 
 const ChatSchema = z.object({
@@ -85,29 +86,50 @@ export async function POST(request: NextRequest) {
       content, conf_score: confScore,
     });
 
-    // ── 9. Auto-capture lead if contact info provided ───────────
-    if (body.visitorName && (body.visitorEmail || body.visitorPhone)) {
+    // ── 9. Auto-capture lead — merge explicit fields, extracted-from-text,
+    //       and what's already on the conversation row. Lead requires a name
+    //       plus at least one of email/phone. Contact info accumulates across
+    //       turns: a name in turn 1 + a phone in turn 2 still creates a lead.
+    const extracted = extractContact(body.message);
+    const { data: convRow } = await supabase.from("conversations")
+      .select("visitor_name, visitor_email, visitor_phone, lead_captured")
+      .eq("id", convId).single();
+
+    const persistUpdate: Record<string, string> = {};
+    if (!convRow?.visitor_name  && (body.visitorName  ?? extracted.name))  persistUpdate.visitor_name  = body.visitorName  ?? extracted.name!;
+    if (!convRow?.visitor_email && (body.visitorEmail ?? extracted.email)) persistUpdate.visitor_email = body.visitorEmail ?? extracted.email!;
+    if (!convRow?.visitor_phone && (body.visitorPhone ?? extracted.phone)) persistUpdate.visitor_phone = body.visitorPhone ?? extracted.phone!;
+
+    if (Object.keys(persistUpdate).length > 0) {
+      await supabase.from("conversations").update(persistUpdate).eq("id", convId);
+    }
+
+    const finalName  = convRow?.visitor_name  ?? persistUpdate.visitor_name  ?? null;
+    const finalEmail = convRow?.visitor_email ?? persistUpdate.visitor_email ?? null;
+    const finalPhone = convRow?.visitor_phone ?? persistUpdate.visitor_phone ?? null;
+
+    if (!convRow?.lead_captured && finalName && (finalEmail || finalPhone)) {
       const { data: existing } = await supabase.from("leads")
-        .select("id").eq("conversation_id", convId).single();
+        .select("id").eq("conversation_id", convId).maybeSingle();
       if (!existing) {
         await supabase.from("leads").insert({
           tenant_id:       body.tenantId,
           conversation_id: convId,
-          full_name:       body.visitorName,
-          email:           body.visitorEmail ?? null,
-          phone:           body.visitorPhone ?? null,
+          full_name:       finalName,
+          email:           finalEmail,
+          phone:           finalPhone,
           temperature:     "warm",
           status:          "new",
         });
         await supabase.from("conversations")
-          .update({ lead_captured: true, visitor_name: body.visitorName,
-                    visitor_email: body.visitorEmail ?? null,
-                    visitor_phone: body.visitorPhone ?? null })
+          .update({ lead_captured: true })
           .eq("id", convId);
       }
     }
 
-    return ok({ conversationId: convId, message: content, confScore });
+    // Flat shape — the widget, test sandbox, and documented REST contract all
+    // read { message, conversationId, confScore } directly.
+    return NextResponse.json({ conversationId: convId, message: content, confScore });
 
   } catch (e) {
     if (e instanceof z.ZodError) return zodErr(e);

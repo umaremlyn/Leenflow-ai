@@ -25,17 +25,60 @@ export async function retrieveContext(
     const supabase = createAdminClient();
     const queryEmbedding = await embedText(query);
 
+    // The RPC takes float8[] and casts to vector(1536) — see migration 009.
+    // Pass the raw array; do not convert to a literal string.
+    //
+    // Threshold note: text-embedding-3-small produces lower raw cosine
+    // similarity than older models (older OpenAI ada-002 cohort sat ~0.6+
+    // for relevant matches; 3-small typically lands at 0.15–0.35 for
+    // relevant matches and ~0.05 for unrelated). 0.15 filters truly
+    // unrelated content while surfacing real semantic hits.
     const { data, error } = await supabase.rpc("match_knowledge_chunks", {
       p_tenant_id:   tenantId,
       p_embedding:   queryEmbedding,
       p_match_count: topK,
-      p_threshold:   0.45,
+      p_threshold:   0.15,
     });
 
-    if (error) { console.error("RAG retrieval error:", error.message); return []; }
-    return data ?? [];
+    if (error) {
+      console.error("[RAG] match_knowledge_chunks error:", error.message);
+      return [];
+    }
+    if (!data || data.length === 0) {
+      // Diagnose empty results — is the tenant's knowledge base empty, or is
+      // the similarity threshold too strict?
+      const { count } = await supabase
+        .from("knowledge_chunks")
+        .select("id", { count: "exact", head: true })
+        .eq("tenant_id", tenantId);
+      console.warn(`[RAG] empty retrieval for tenant=${tenantId} query="${query.slice(0,60)}" — total chunks in DB: ${count ?? 0}`);
+
+      // If chunks exist, dump their actual similarity scores — this tells
+      // us whether the embeddings are bad (~0 similarity) or just below the
+      // 0.45 threshold.
+      if ((count ?? 0) > 0) {
+        const { data: debug, error: debugErr } = await supabase.rpc("debug_top_chunks", {
+          p_tenant_id:   tenantId,
+          p_embedding:   queryEmbedding,
+          p_match_count: 3,
+        });
+        if (debugErr) {
+          console.warn(`[RAG] debug_top_chunks error: ${debugErr.message} — run migration 009`);
+        } else {
+          console.warn("[RAG] top similarity scores (no threshold):",
+            (debug ?? []).map((r: any) => ({
+              source: r.source_type,
+              similarity: Number(r.similarity).toFixed(3),
+              preview: String(r.content ?? "").slice(0, 50),
+            })),
+          );
+        }
+      }
+      return [];
+    }
+    return data;
   } catch (err) {
-    console.error("retrieveContext failed:", err);
+    console.error("[RAG] retrieveContext failed:", err);
     return [];
   }
 }
@@ -44,32 +87,34 @@ export async function retrieveContext(
 function buildSystemPrompt(
   assistant: Assistant,
   tenantName: string,
-  context: Array<{ content: string; source_type: string }>
+  context: Array<{ content: string; source_type: string }>,
+  isFirstTurn: boolean,
 ): string {
   const contextBlock = context.length > 0
-    ? `\n\n---\nRELEVANT BUSINESS INFORMATION (use only this to answer):\n${
+    ? `\n\nBUSINESS INFORMATION (your only source of truth — never invent details):\n${
         context.map((c, i) => `[${i + 1}] (${c.source_type}) ${c.content}`).join("\n")
-      }\n---`
+      }`
     : "";
 
-  return `You are ${assistant.name}, the AI customer assistant for ${tenantName}.
+  const greetingRule = isFirstTurn
+    ? `Open your first reply with: "${assistant.greeting_msg}". After that, do NOT greet again.`
+    : `You are mid-conversation. Do NOT greet, do NOT introduce yourself, do NOT start with "Hi" — pick up from the previous turn.`;
 
-PERSONA:
-- Tone: ${assistant.persona_tone}
-- Language: Respond in ${assistant.language}
-- Greeting message: "${assistant.greeting_msg}"
+  const leadRule = assistant.lead_capture_on
+    ? "If the customer asks about specific pricing or how to buy, ask once for their name and contact (email or phone). Once they share it, thank them briefly by name and continue helping — never ask again."
+    : "Answer questions directly without requiring contact information.";
 
-STRICT RULES:
-1. Only answer questions about ${tenantName} and its products, services, and policies.
-2. If a customer asks something not covered in the business information below, say: "${assistant.fallback_msg}"
-3. Never invent prices, policies, or product details not found in the context.
-4. Keep responses concise — 1 to 3 sentences unless listing multiple items.
-5. ${assistant.lead_capture_on
-    ? "Before sharing specific pricing details, politely ask for the customer's name and contact (email or phone)."
-    : "Answer questions directly without requiring contact information."}
-6. If asked about payments, give the exact payment instructions provided.
-7. Never pretend to be human — you are an AI assistant.
-${contextBlock}`;
+  return `You are ${assistant.name}, an AI customer assistant for ${tenantName}.
+Tone: ${assistant.persona_tone}. Reply in ${assistant.language}.
+
+CONVERSATION RULES:
+- ${greetingRule}
+- Use the conversation history to interpret short replies like "yes", "tell me more", "the first one", "how much" — stay on the topic the customer is asking about.
+- Keep replies short: 1–3 sentences, or a brief list when comparing items. Do NOT repeat information the customer already saw in the previous reply.
+- ${leadRule}
+- If asked about payments, give the exact payment instructions provided below.
+- Never pretend to be human — you are an AI assistant.
+- If the question is unrelated to ${tenantName} or the information below doesn't cover it, reply exactly: "${assistant.fallback_msg}"${contextBlock}`;
 }
 
 // ─── Score response confidence based on retrieved context ────
@@ -94,8 +139,14 @@ export async function chat(params: {
 }): Promise<{ content: string; confScore: number }> {
   const { tenantId, tenantName, assistant, messages, userMessage } = params;
 
-  // 1. Retrieve context from the tenant's knowledge base
-  const context = await retrieveContext(tenantId, userMessage);
+  // 1. Retrieve context. For short follow-ups like "yes please" / "tell me more"
+  //    the message alone has no semantic anchor — combine with the previous
+  //    user turn so retrieval stays on topic.
+  const lastUserMsg = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
+  const retrievalQuery = lastUserMsg && userMessage.trim().split(/\s+/).length < 5
+    ? `${lastUserMsg}\n${userMessage}`
+    : userMessage;
+  const context = await retrieveContext(tenantId, retrievalQuery);
 
   // 2. If confidence too low and no context found, return fallback immediately
   const confScore = scoreConfidence(context, userMessage);
@@ -104,7 +155,8 @@ export async function chat(params: {
   }
 
   // 3. Build system prompt with context injected
-  const systemPrompt = buildSystemPrompt(assistant, tenantName, context);
+  const isFirstTurn = messages.length === 0;
+  const systemPrompt = buildSystemPrompt(assistant, tenantName, context, isFirstTurn);
 
   // 4. Call OpenAI gpt-4o-mini — fast, cost-effective for customer support
   const response = await openai.chat.completions.create({

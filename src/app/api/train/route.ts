@@ -1,7 +1,8 @@
+import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { trainTenant } from "@/lib/ai/train";
 import { rateLimit, RATE_LIMITS } from "@/lib/utils/rateLimit";
-import { ok, unauthorized, forbidden, rateLimited, serverError } from "@/lib/utils/apiResponse";
+import { unauthorized, forbidden, rateLimited, serverError } from "@/lib/utils/apiResponse";
 
 export async function POST() {
   try {
@@ -18,7 +19,8 @@ export async function POST() {
     if (!limit.allowed) return rateLimited(limit.resetInMs);
 
     const result = await trainTenant(appUser.tenant_id);
-    return ok({ ...result, trainedAt: new Date().toISOString() });
+    // Flat shape — the AI Assistant page reads `chunksIndexed` and `errors` directly.
+    return NextResponse.json({ ...result, trainedAt: new Date().toISOString() });
   } catch (e) {
     return serverError(e, "train-route");
   }

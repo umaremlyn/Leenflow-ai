@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { CreditCard, Plus, Trash2, Check } from "lucide-react";
+import { triggerTrain } from "@/lib/utils/triggerTrain";
 import type { PaymentInfo, PaymentMethodType } from "@/types";
 
 const METHOD_META: Record<PaymentMethodType, { label: string; icon: string; placeholder: string }> = {
@@ -53,18 +54,21 @@ export default function PaymentsPage() {
   async function addPayment(e: React.FormEvent) {
     e.preventDefault(); setSaving(true);
     await supabase.from("payment_info").insert({ tenant_id: tenantId, ...form });
+    triggerTrain();
     setShowForm(false); setForm({ method_type: "bank_transfer", instructions: "" });
     setSaving(false); load();
   }
 
   async function toggle(p: PaymentInfo) {
     await supabase.from("payment_info").update({ is_active: !p.is_active }).eq("id", p.id);
+    triggerTrain();
     setPayments(ps => ps.map(x => x.id === p.id ? { ...x, is_active: !x.is_active } : x));
   }
 
   async function remove(id: string) {
     if (!confirm("Remove this payment method?")) return;
     await supabase.from("payment_info").delete().eq("id", id);
+    triggerTrain();
     setPayments(ps => ps.filter(p => p.id !== id));
   }
 

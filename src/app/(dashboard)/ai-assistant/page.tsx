@@ -2,7 +2,18 @@
 import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Bot, RefreshCw, Send, ToggleLeft, ToggleRight } from "lucide-react";
-import type { Assistant } from "@/types";
+import type { Assistant, BehaviourRules } from "@/types";
+import { DEFAULT_BEHAVIOUR_RULES } from "@/types";
+
+type BehaviourKey = keyof BehaviourRules;
+
+const BEHAVIOUR_RULES: { key: BehaviourKey; label: string; desc: string }[] = [
+  { key: "capture_lead_before_pricing", label: "Capture lead before sharing pricing", desc: "AI asks for name & contact first" },
+  { key: "escalate_on_low_confidence",  label: "Escalate if confidence below 60%",   desc: "Show fallback message on low confidence" },
+  { key: "only_business_topics",        label: "Only answer about my business",      desc: "AI ignores off-topic questions" },
+  { key: "show_payment_steps",          label: "Show payment steps when asked",      desc: "Guide users through payment process" },
+  { key: "after_hours_response",        label: "After-hours auto-response",          desc: "Different message outside business hours" },
+];
 
 const TABS = ["Training sources", "Behaviour", "Test sandbox", "Persona"] as const;
 type Tab = typeof TABS[number];
@@ -14,11 +25,26 @@ export default function AIAssistantPage() {
   const [training, setTraining] = useState(false);
   const [trainResult, setTrainResult] = useState<{chunksIndexed:number;errors:string[]}|null>(null);
   const [messages, setMessages] = useState<{role:string;content:string;conf?:number}[]>([]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const msgEndRef = useRef<HTMLDivElement>(null);
   const supabase = createClient();
+
+  const [chunkCounts, setChunkCounts] = useState<Record<string, number>>({});
+
+  const loadChunkCounts = async (tid: string) => {
+    const { data } = await supabase
+      .from("knowledge_chunks")
+      .select("source_type")
+      .eq("tenant_id", tid);
+    const counts: Record<string, number> = { product: 0, faq: 0, policy: 0, payment: 0 };
+    (data ?? []).forEach((r: any) => {
+      if (r.source_type in counts) counts[r.source_type]++;
+    });
+    setChunkCounts(counts);
+  };
 
   useEffect(() => {
     (async () => {
@@ -26,7 +52,13 @@ export default function AIAssistantPage() {
       const { data: appUser } = await supabase.from("users").select("tenant_id").eq("id", user!.id).single();
       setTenantId(appUser?.tenant_id ?? null);
       const { data } = await supabase.from("assistants").select("*").eq("tenant_id", appUser!.tenant_id).single();
-      setAssistant(data);
+      if (data) {
+        setAssistant({
+          ...data,
+          behaviour_rules: { ...DEFAULT_BEHAVIOUR_RULES, ...(data.behaviour_rules ?? {}) },
+        });
+      }
+      if (appUser?.tenant_id) await loadChunkCounts(appUser.tenant_id);
     })();
   }, []);
 
@@ -38,6 +70,7 @@ export default function AIAssistantPage() {
     const data = await res.json();
     setTrainResult(data);
     setTraining(false);
+    if (tenantId) await loadChunkCounts(tenantId);
   }
 
   async function toggleLive() {
@@ -59,6 +92,13 @@ export default function AIAssistantPage() {
     setSaving(false);
   }
 
+  async function toggleBehaviour(key: BehaviourKey) {
+    if (!assistant || !tenantId) return;
+    const next = { ...assistant.behaviour_rules, [key]: !assistant.behaviour_rules[key] };
+    setAssistant({ ...assistant, behaviour_rules: next });
+    await supabase.from("assistants").update({ behaviour_rules: next }).eq("tenant_id", tenantId);
+  }
+
   async function sendTest() {
     if (!input.trim() || !tenantId) return;
     const userMsg = input.trim(); setInput(""); setChatLoading(true);
@@ -66,19 +106,31 @@ export default function AIAssistantPage() {
     const res = await fetch("/api/assistant/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tenantId, message: userMsg, channel: "website" }),
+      body: JSON.stringify({
+        tenantId,
+        message:        userMsg,
+        channel:        "website",
+        conversationId: conversationId ?? undefined,
+      }),
     });
     const data = await res.json();
+    if (data.conversationId) setConversationId(data.conversationId);
     setMessages(m => [...m, { role: "assistant", content: data.message ?? data.error, conf: data.confScore }]);
     setChatLoading(false);
   }
 
+  function resetConversation() {
+    setMessages([]);
+    setConversationId(null);
+  }
+
   const SOURCES = [
-    { label: "Products & services", type: "product", color: "bg-rose-50 text-rose-600", conf: 92 },
-    { label: "FAQs",                type: "faq",     color: "bg-amber-50 text-amber-600", conf: 88 },
-    { label: "Business policies",   type: "policy",  color: "bg-teal-50 text-teal-600",  conf: 74 },
-    { label: "Payment info",        type: "payment", color: "bg-blue-50 text-blue-600",  conf: 81 },
+    { label: "Products & services", type: "product", color: "bg-rose-50 text-rose-600"   },
+    { label: "FAQs",                type: "faq",     color: "bg-amber-50 text-amber-600" },
+    { label: "Business policies",   type: "policy",  color: "bg-teal-50 text-teal-600"   },
+    { label: "Payment info",        type: "payment", color: "bg-blue-50 text-blue-600"   },
   ];
+  const totalChunks = Object.values(chunkCounts).reduce((s, n) => s + n, 0);
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -113,29 +165,47 @@ export default function AIAssistantPage() {
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-semibold text-gray-900">Knowledge sources</h2>
-              <span className="text-xs text-gray-400">Confidence score</span>
+              <span className="text-xs text-gray-400">Indexed chunks</span>
             </div>
             <div className="space-y-3">
-              {SOURCES.map(s => (
-                <div key={s.type} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 transition-colors">
-                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs ${s.color}`}>
-                    {s.type[0].toUpperCase()}
+              {SOURCES.map(s => {
+                const count = chunkCounts[s.type] ?? 0;
+                return (
+                  <div key={s.type} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 transition-colors">
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs ${s.color}`}>
+                      {s.type[0].toUpperCase()}
+                    </div>
+                    <span className="text-sm text-gray-700 flex-1">{s.label}</span>
+                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                      count > 0 ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
+                    }`}>{count}</span>
                   </div>
-                  <span className="text-sm text-gray-700 flex-1">{s.label}</span>
-                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                    s.conf >= 85 ? "bg-green-100 text-green-700" : s.conf >= 70 ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-600"
-                  }`}>{s.conf}%</span>
-                </div>
-              ))}
+                );
+              })}
             </div>
+            {totalChunks === 0 && (
+              <p className="text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2 mt-3">
+                Your AI has nothing to learn from yet. Add at least one product, FAQ, or policy, then re-train.
+              </p>
+            )}
             <button onClick={retrain} disabled={training}
               className="w-full mt-4 flex items-center justify-center gap-2 bg-brand-50 hover:bg-brand-100 text-brand-600 text-sm font-medium py-2 rounded-lg transition-colors disabled:opacity-60">
               <RefreshCw size={13} className={training ? "animate-spin" : ""} />
               {training ? "Training…" : "Re-train AI on latest data"}
             </button>
-            {trainResult && (
+            {trainResult && trainResult.errors && trainResult.errors.length > 0 && (
+              <div className="mt-2 text-xs bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                <p className="text-red-700 font-medium mb-1">Training had {trainResult.errors.length} error(s):</p>
+                <ul className="text-red-600 space-y-0.5 max-h-24 overflow-y-auto">
+                  {trainResult.errors.slice(0, 5).map((e: string, i: number) => (
+                    <li key={i} className="truncate">• {e}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {trainResult && (!trainResult.errors || trainResult.errors.length === 0) && (
               <p className="text-xs text-center mt-2 text-green-600">
-                ✓ {trainResult.chunksIndexed} chunks indexed successfully
+                ✓ {trainResult.chunksIndexed ?? 0} chunks indexed successfully
               </p>
             )}
           </div>
@@ -170,7 +240,16 @@ export default function AIAssistantPage() {
               <p className="text-sm font-medium text-white">{assistant?.name ?? "Leen"}</p>
               <p className="text-xs text-white/70">AI assistant sandbox</p>
             </div>
-            <div className="ml-auto w-2 h-2 rounded-full bg-green-400" title="Online" />
+            <button
+              type="button"
+              onClick={resetConversation}
+              disabled={messages.length === 0}
+              className="ml-auto text-[11px] text-white/80 hover:text-white px-2 py-1 rounded transition-colors disabled:opacity-40"
+              title="Start a new conversation"
+            >
+              Reset
+            </button>
+            <div className="w-2 h-2 rounded-full bg-green-400 ml-2" title="Online" />
           </div>
           <div className="h-72 overflow-y-auto p-4 bg-gray-50 flex flex-col gap-3">
             {messages.length === 0 && (
@@ -258,26 +337,29 @@ export default function AIAssistantPage() {
         </div>
       )}
 
-      {tab === "Behaviour" && (
+      {tab === "Behaviour" && assistant && (
         <div className="bg-white rounded-xl border border-gray-200 p-6 max-w-xl">
           <div className="space-y-4">
-            {[
-              { label: "Capture lead before sharing pricing", desc: "AI asks for name & contact first" },
-              { label: "Escalate if confidence below 60%", desc: "Show fallback message on low confidence" },
-              { label: "Only answer about my business", desc: "AI ignores off-topic questions" },
-              { label: "Show payment steps when asked", desc: "Guide users through payment process" },
-              { label: "After-hours auto-response", desc: "Different message outside business hours" },
-            ].map((rule, i) => (
-              <div key={rule.label} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
-                <div>
-                  <p className="text-sm font-medium text-gray-800">{rule.label}</p>
-                  <p className="text-xs text-gray-400 mt-0.5">{rule.desc}</p>
+            {BEHAVIOUR_RULES.map(rule => {
+              const on = assistant.behaviour_rules[rule.key];
+              return (
+                <div key={rule.key} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+                  <div>
+                    <p className="text-sm font-medium text-gray-800">{rule.label}</p>
+                    <p className="text-xs text-gray-400 mt-0.5">{rule.desc}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => toggleBehaviour(rule.key)}
+                    aria-pressed={on}
+                    aria-label={rule.label}
+                    className={`w-11 h-6 rounded-full relative cursor-pointer transition-colors ${on ? "bg-brand-600" : "bg-gray-300"}`}
+                  >
+                    <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${on ? "right-1" : "left-1"}`} />
+                  </button>
                 </div>
-                <div className={`w-11 h-6 rounded-full relative cursor-pointer transition-colors ${i < 4 ? "bg-brand-600" : "bg-gray-300"}`}>
-                  <span className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${i < 4 ? "right-1" : "left-1"}`} />
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

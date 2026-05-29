@@ -11,6 +11,7 @@ export default function IntegrationsPage() {
   const [waPhone, setWaPhone]       = useState("");
   const [waToken, setWaToken]       = useState("");
   const [savingWa, setSavingWa]     = useState(false);
+  const [waError, setWaError]       = useState("");
   const supabase = createClient();
 
   const load = useCallback(async () => {
@@ -18,6 +19,15 @@ export default function IntegrationsPage() {
     const { data: u } = await supabase.from("users").select("tenant_id").eq("id", user!.id).single();
     setTenantId(u!.tenant_id);
     setAppUrl(process.env.NEXT_PUBLIC_APP_URL ?? "https://leenco.ai");
+
+    const res = await fetch("/api/integrations/whatsapp");
+    if (res.ok) {
+      const data = await res.json();
+      if (data.connected) {
+        setWaConnected(true);
+        setWaPhone(data.phone_number_id ?? "");
+      }
+    }
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -64,10 +74,38 @@ const { message, conversationId, confScore } = await response.json();`;
 }`;
 
   async function saveWhatsApp(e: React.FormEvent) {
-    e.preventDefault(); setSavingWa(true);
-    // In production: store WHATSAPP_PHONE_NUMBER_ID per tenant in DB
-    await new Promise(r => setTimeout(r, 800));
-    setWaConnected(true); setSavingWa(false);
+    e.preventDefault(); setSavingWa(true); setWaError("");
+    try {
+      const res = await fetch("/api/integrations/whatsapp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone_number_id: waPhone, access_token: waToken }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setWaError(data.error ?? "Could not save WhatsApp connection.");
+      } else {
+        setWaConnected(true);
+        setWaToken("");
+      }
+    } catch (err) {
+      setWaError(err instanceof Error ? err.message : "Network error");
+    } finally {
+      setSavingWa(false);
+    }
+  }
+
+  async function disconnectWhatsApp() {
+    setWaError("");
+    const res = await fetch("/api/integrations/whatsapp", { method: "DELETE" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      setWaError(data.error ?? "Could not disconnect.");
+      return;
+    }
+    setWaConnected(false);
+    setWaPhone("");
+    setWaToken("");
   }
 
   return (
@@ -153,6 +191,7 @@ const { message, conversationId, confScore } = await response.json();`;
                     </div>
                     <p className="text-xs text-gray-400 mt-1">Use this as the verify token in your Meta app webhook settings. Webhook URL: <code className="bg-gray-100 px-1 rounded text-[10px]">{appUrl}/api/webhook/whatsapp</code></p>
                   </div>
+                  {waError && <p className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">{waError}</p>}
                   <button type="submit" disabled={savingWa}
                     className="w-full bg-green-600 hover:bg-green-700 text-white text-sm font-medium py-2.5 rounded-lg transition-colors disabled:opacity-60">
                     {savingWa ? "Connecting…" : "Connect WhatsApp"}
@@ -160,10 +199,13 @@ const { message, conversationId, confScore } = await response.json();`;
                 </form>
               </>
             ) : (
-              <div className="flex items-center gap-3 text-sm text-green-700">
-                <Check size={16} className="text-green-600"/>
-                WhatsApp is connected. Your AI is replying to messages automatically.
-                <button onClick={() => setWaConnected(false)} className="ml-auto text-xs text-red-500 hover:underline">Disconnect</button>
+              <div className="space-y-2">
+                <div className="flex items-center gap-3 text-sm text-green-700">
+                  <Check size={16} className="text-green-600"/>
+                  WhatsApp is connected{waPhone && <> for phone ID <code className="bg-gray-100 px-1 rounded text-[11px]">{waPhone}</code></>}. Your AI is replying to messages automatically.
+                  <button onClick={disconnectWhatsApp} className="ml-auto text-xs text-red-500 hover:underline">Disconnect</button>
+                </div>
+                {waError && <p className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded-lg">{waError}</p>}
               </div>
             )}
           </div>

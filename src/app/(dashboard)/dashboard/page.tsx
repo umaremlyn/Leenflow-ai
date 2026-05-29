@@ -15,30 +15,49 @@ export default async function DashboardPage() {
 
   const tenantId = appUser?.tenant_id;
 
-  // Fetch stats in parallel
-  const [convsRes, leadsRes] = await Promise.all([
+  // Fetch stats in parallel (messages are RLS-scoped to the tenant via conversations)
+  const [convsRes, leadsRes, msgsRes] = await Promise.all([
     supabase.from("conversations").select("id", { count: "exact" }).eq("tenant_id", tenantId),
     supabase.from("leads")
       .select("id, full_name, temperature, status, captured_at", { count: "exact" })
       .eq("tenant_id", tenantId)
       .order("captured_at", { ascending: false })
       .limit(4),
+    supabase.from("messages").select("role, content, conf_score"),
   ]);
 
   const totalConversations = convsRes.count ?? 0;
   const totalLeads         = leadsRes.count ?? 0;
   const recentLeads        = leadsRes.data ?? [];
+  const allMessages        = msgsRes.data ?? [];
+
+  // AI resolution rate + unanswered Qs from assistant message confidence scores
+  const RES_THRESHOLD = 0.6;
+  const assistantMsgs = allMessages.filter((m: any) => m.role === "assistant" && m.conf_score !== null);
+  const resolved      = assistantMsgs.filter((m: any) => m.conf_score >= RES_THRESHOLD).length;
+  const unanswered    = assistantMsgs.length - resolved;
+  const resolutionPct = assistantMsgs.length > 0 ? Math.round((resolved / assistantMsgs.length) * 100) : 0;
+
+  // Top questions from user messages — normalize, count, take top 5
+  const qCounts = new Map<string, number>();
+  allMessages
+    .filter((m: any) => m.role === "user" && typeof m.content === "string")
+    .forEach((m: any) => {
+      const key = m.content.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 80);
+      if (key.length < 4) return;
+      qCounts.set(key, (qCounts.get(key) ?? 0) + 1);
+    });
+  const totalUserMsgs = Array.from(qCounts.values()).reduce((s, n) => s + n, 0);
+  const topQuestions = Array.from(qCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([q, count]) => ({
+      q: q.length > 40 ? q.slice(0, 37) + "…" : q,
+      pct: totalUserMsgs > 0 ? Math.round((count / totalUserMsgs) * 100) : 0,
+    }));
 
   const tenant    = (appUser as any)?.tenants;
   const firstName = (appUser as any)?.full_name?.split(" ")[0] ?? "there";
-
-  const topQuestions = [
-    { q: "Delivery timeline", pct: 34 },
-    { q: "Pricing details",   pct: 28 },
-    { q: "Return policy",     pct: 19 },
-    { q: "Payment methods",   pct: 12 },
-    { q: "Custom orders",     pct: 7  },
-  ];
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -49,10 +68,10 @@ export default async function DashboardPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-4 gap-4 mb-6">
-        <StatCard label="Conversations" value={totalConversations} delta="+18% vs yesterday" trend="up" icon={MessageSquare} />
-        <StatCard label="Leads captured" value={totalLeads} delta="+3 new today" trend="up" icon={Users} />
-        <StatCard label="AI resolution" value="84%" delta="up from 79%" trend="up" icon={CheckCircle} iconColor="text-green-600" />
-        <StatCard label="Unanswered Qs" value="5" delta="needs attention" trend="down" icon={AlertCircle} iconColor="text-red-500" />
+        <StatCard label="Conversations"  value={totalConversations}        icon={MessageSquare} />
+        <StatCard label="Leads captured" value={totalLeads}                icon={Users} />
+        <StatCard label="AI resolution"  value={`${resolutionPct}%`}       icon={CheckCircle} iconColor="text-green-600" />
+        <StatCard label="Unanswered Qs"  value={unanswered}                icon={AlertCircle} iconColor="text-red-500" />
       </div>
 
       <div className="grid grid-cols-2 gap-4">
@@ -87,12 +106,16 @@ export default async function DashboardPage() {
             <a href="/faqs" className="text-xs text-brand-600 hover:underline">Update FAQs</a>
           </div>
           <div className="space-y-3">
-            {topQuestions.map(({ q, pct }, i) => {
+            {topQuestions.length === 0 ? (
+              <p className="text-sm text-gray-400 text-center py-4">
+                No customer questions yet — your AI will surface the top ones here as they come in
+              </p>
+            ) : topQuestions.map(({ q, pct }, i) => {
               const colors = ["#534AB7","#7F77DD","#AFA9EC","#CECBF6","#EEEDFE"];
               return (
                 <div key={q}>
                   <div className="flex justify-between text-xs text-gray-600 mb-1">
-                    <span>{q}</span><span>{pct}%</span>
+                    <span className="truncate pr-2">{q}</span><span>{pct}%</span>
                   </div>
                   <div className="h-1.5 bg-gray-100 rounded-full">
                     <div className="h-1.5 rounded-full transition-all"

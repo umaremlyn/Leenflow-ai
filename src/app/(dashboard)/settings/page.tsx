@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Settings, Building2, User, CreditCard, Shield, Save, Check } from "lucide-react";
 import type { Tenant } from "@/types";
@@ -19,6 +20,12 @@ const PLANS = [
   { id: "enterprise", name: "Enterprise", price: "₦45,000/mo",   messages: "Unlimited",     features: ["All Growth features","API access","White-label widget","Priority support"]   },
 ];
 
+const PLAN_RANK: Record<string, number> = { starter: 0, growth: 1, enterprise: 2 };
+function isDowngrade(current: string | undefined, target: string): boolean {
+  if (!current) return false;
+  return (PLAN_RANK[target] ?? 0) < (PLAN_RANK[current] ?? 0);
+}
+
 export default function SettingsPage() {
   const [tab, setTab]               = useState<Tab>("business");
   const [tenant, setTenant]         = useState<Tenant|null>(null);
@@ -29,7 +36,14 @@ export default function SettingsPage() {
   const [saving, setSaving]         = useState(false);
   const [saved, setSaved]           = useState(false);
   const [pwError, setPwError]       = useState("");
+  const [planBusy, setPlanBusy]     = useState<string | null>(null);
+  const [planError, setPlanError]   = useState("");
+  const [showDelete, setShowDelete] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
+  const [deleting, setDeleting]     = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const supabase = createClient();
+  const router = useRouter();
 
   const load = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -66,6 +80,58 @@ export default function SettingsPage() {
     if (error) { setPwError(error.message); } else { setSaved(true); setPwForm({ current:"", newPw:"", confirm:"" }); }
     setSaving(false);
     setTimeout(() => setSaved(false), 2000);
+  }
+
+  async function changePlan(targetPlan: string) {
+    if (!tenant || targetPlan === tenant.plan) return;
+    setPlanBusy(targetPlan); setPlanError("");
+
+    if (targetPlan === "starter") {
+      // Downgrade is handled via Paystack subscription disable + customer portal.
+      setPlanError("To downgrade, cancel your subscription from the Paystack receipt email or contact support.");
+      setPlanBusy(null);
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/billing/initialize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan: targetPlan }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.authorization_url) {
+        setPlanError(data.error ?? "Could not start checkout.");
+        setPlanBusy(null);
+        return;
+      }
+      window.location.href = data.authorization_url;
+    } catch (e) {
+      setPlanError(e instanceof Error ? e.message : "Network error");
+      setPlanBusy(null);
+    }
+  }
+
+  async function deleteAccount() {
+    if (!tenant || deleteConfirm !== tenant.name) {
+      setDeleteError(`Type "${tenant?.name ?? ""}" exactly to confirm.`);
+      return;
+    }
+    setDeleting(true); setDeleteError("");
+    try {
+      const res = await fetch("/api/account/delete", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setDeleteError(data.error ?? "Could not delete account.");
+        setDeleting(false);
+        return;
+      }
+      await supabase.auth.signOut();
+      router.push("/login");
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : "Network error");
+      setDeleting(false);
+    }
   }
 
   const usagePct = tenant ? Math.min(100, Math.round((tenant.msg_used / tenant.msg_limit) * 100)) : 0;
@@ -195,14 +261,24 @@ export default function SettingsPage() {
                         ))}
                       </ul>
                       {!current && (
-                        <button className="w-full bg-brand-600 hover:bg-brand-800 text-white text-xs font-medium py-2 rounded-lg transition-colors">
-                          {tenant?.plan === "enterprise" && plan.id !== "enterprise" ? "Downgrade" : "Upgrade"}
+                        <button
+                          type="button"
+                          onClick={() => changePlan(plan.id)}
+                          disabled={planBusy !== null}
+                          className="w-full bg-brand-600 hover:bg-brand-800 text-white text-xs font-medium py-2 rounded-lg transition-colors disabled:opacity-60"
+                        >
+                          {planBusy === plan.id
+                            ? "Redirecting…"
+                            : isDowngrade(tenant?.plan, plan.id)
+                              ? "Downgrade"
+                              : "Upgrade"}
                         </button>
                       )}
                     </div>
                   );
                 })}
               </div>
+              {planError && <p className="text-xs text-red-600 text-center">{planError}</p>}
               <p className="text-xs text-gray-400 text-center">Payments processed via Paystack. Cancel anytime.</p>
             </div>
           )}
@@ -235,8 +311,16 @@ export default function SettingsPage() {
 
               <div>
                 <h3 className="text-sm font-semibold text-gray-900 mb-1">Danger zone</h3>
-                <p className="text-xs text-gray-500 mb-3">Permanently delete your account and all business data. This cannot be undone.</p>
-                <button className="text-sm text-red-600 border border-red-300 hover:bg-red-50 px-4 py-2 rounded-lg transition-colors">
+                <p className="text-xs text-gray-500 mb-3">
+                  {appUser?.role === "owner"
+                    ? "Permanently delete your account and all business data. This cannot be undone."
+                    : "Permanently delete your account. This cannot be undone."}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => { setShowDelete(true); setDeleteConfirm(""); setDeleteError(""); }}
+                  className="text-sm text-red-600 border border-red-300 hover:bg-red-50 px-4 py-2 rounded-lg transition-colors"
+                >
                   Delete account
                 </button>
               </div>
@@ -245,6 +329,53 @@ export default function SettingsPage() {
 
         </div>
       </div>
+
+      {showDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-xl">
+            <h3 className="text-base font-semibold text-gray-900 mb-2">Delete account?</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              {appUser?.role === "owner" ? (
+                <>This will permanently delete <strong>{tenant?.name}</strong> and all associated products, FAQs, conversations, and leads. This cannot be undone.</>
+              ) : (
+                <>This will permanently remove your user from <strong>{tenant?.name}</strong>. This cannot be undone.</>
+              )}
+            </p>
+            {appUser?.role === "owner" && (
+              <div className="mb-4">
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Type <span className="font-mono">{tenant?.name}</span> to confirm
+                </label>
+                <input
+                  value={deleteConfirm}
+                  onChange={e => setDeleteConfirm(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-500"
+                  autoFocus
+                />
+              </div>
+            )}
+            {deleteError && <p className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg mb-3">{deleteError}</p>}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDelete(false)}
+                disabled={deleting}
+                className="text-sm text-gray-600 px-4 py-2 rounded-lg hover:bg-gray-100 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={deleteAccount}
+                disabled={deleting || (appUser?.role === "owner" && deleteConfirm !== tenant?.name)}
+                className="text-sm bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-60"
+              >
+                {deleting ? "Deleting…" : "Delete forever"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
